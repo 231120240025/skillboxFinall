@@ -83,6 +83,9 @@ public class IndexingService {
             executor.scheduleWithFixedDelay(() -> {
                 if (urlsToVisit.isEmpty()) {
                     executor.shutdown();
+                    site.setStatus(Status.INDEXED);
+                    site.setStatusTime(LocalDateTime.now());
+                    siteRepository.save(site); // Обновление статуса на INDEXED после завершения обхода
                     System.out.println("Обход завершен для сайта: " + site.getUrl());
                     return;
                 }
@@ -105,6 +108,10 @@ public class IndexingService {
                         String content = new String(connection.getInputStream().readAllBytes());
 
                         savePage(site, currentUrl.replace(startUrl, ""), statusCode, content);
+
+                        // Обновление времени последнего изменения в таблице Site
+                        site.setStatusTime(LocalDateTime.now());
+                        siteRepository.save(site);
 
                         List<String> links = extractLinks(content, startUrl);
                         for (String link : links) {
@@ -135,7 +142,6 @@ public class IndexingService {
             }
         }
     }
-
 
 
     private List<String> extractLinks(String content, String baseUrl) {
