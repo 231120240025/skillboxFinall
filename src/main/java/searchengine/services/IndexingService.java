@@ -9,8 +9,13 @@ import searchengine.model.Status;
 import searchengine.repositories.PageRepository;
 import searchengine.repositories.SiteRepository;
 
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.time.LocalDateTime;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class IndexingService {
@@ -60,14 +65,96 @@ public class IndexingService {
                 Site site = createOrUpdateSiteRecord(siteUrl, siteName);
                 System.out.println("Сайт подготовлен для индексации: " + siteName);
 
-                // Пример добавления страниц с динамическими HTTP-статусами
-                savePage(site, "/index.html", generateStatusCode(), "<html>Главная страница</html>");
-                savePage(site, "/about.html", generateStatusCode(), "<html>О компании</html>");
-                savePage(site, "/contact.html", generateStatusCode(), "<html>Контакты</html>");
+                crawlSite(site, siteUrl);
             }
         } catch (Exception e) {
             System.err.println("Ошибка обработки сайта " + siteUrl + ": " + e.getMessage());
         }
+    }
+
+    @SuppressWarnings("resource") // Подавление предупреждения о try-with-resources
+    private void crawlSite(Site site, String startUrl) {
+        Queue<String> urlsToVisit = new LinkedList<>();
+        Set<String> visitedUrls = new HashSet<>();
+        urlsToVisit.add(startUrl);
+
+        ScheduledExecutorService executor = Executors.newScheduledThreadPool(1);
+        try {
+            executor.scheduleWithFixedDelay(() -> {
+                if (urlsToVisit.isEmpty()) {
+                    executor.shutdown();
+                    System.out.println("Обход завершен для сайта: " + site.getUrl());
+                    return;
+                }
+
+                String currentUrl = urlsToVisit.poll();
+                if (currentUrl == null || visitedUrls.contains(currentUrl)) {
+                    return;
+                }
+                visitedUrls.add(currentUrl);
+
+                for (int attempt = 1; attempt <= 3; attempt++) {
+                    try {
+                        HttpURLConnection connection = (HttpURLConnection) new URL(currentUrl).openConnection();
+                        connection.setRequestMethod("GET");
+                        connection.setConnectTimeout(10000);
+                        connection.setReadTimeout(15000);
+                        connection.setRequestProperty("User-Agent", "Mozilla/5.0 (compatible; IndexerBot/1.0)");
+
+                        int statusCode = connection.getResponseCode();
+                        String content = new String(connection.getInputStream().readAllBytes());
+
+                        savePage(site, currentUrl.replace(startUrl, ""), statusCode, content);
+
+                        List<String> links = extractLinks(content, startUrl);
+                        for (String link : links) {
+                            if (!visitedUrls.contains(link)) {
+                                urlsToVisit.add(link);
+                            }
+                        }
+                        break;
+                    } catch (Exception e) {
+                        System.err.println("Попытка " + attempt + " для " + currentUrl + " завершилась ошибкой: " + e.getMessage());
+                        if (attempt == 3) {
+                            System.err.println("Превышено количество попыток для " + currentUrl);
+                        }
+                    }
+                }
+            }, 0, 500, TimeUnit.MILLISECONDS);
+
+            if (!executor.awaitTermination(1, TimeUnit.HOURS)) {
+                System.err.println("Некоторые задачи не завершились в отведенное время. Принудительное завершение...");
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("Обход был прерван: " + e.getMessage());
+        } finally {
+            if (!executor.isShutdown()) {
+                executor.shutdownNow();
+            }
+        }
+    }
+
+
+
+    private List<String> extractLinks(String content, String baseUrl) {
+        List<String> links = new ArrayList<>();
+        Pattern pattern = Pattern.compile("href\\s*=\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(content);
+
+        while (matcher.find()) {
+            String link = matcher.group(1);
+            if (link.startsWith("/")) {
+                link = baseUrl + link;
+            } else if (!link.startsWith("http")) {
+                continue; // Пропуск ссылок на внешние ресурсы или относительных ссылок
+            }
+            if (link.startsWith(baseUrl)) {
+                links.add(link);
+            }
+        }
+        return links;
     }
 
     private Site createOrUpdateSiteRecord(String siteUrl, String siteName) {
@@ -120,11 +207,5 @@ public class IndexingService {
         } catch (Exception e) {
             System.err.println("Ошибка при сохранении страницы " + path + ": " + e.getMessage());
         }
-    }
-
-    private int generateStatusCode() {
-        // Генерация случайного HTTP-статуса для тестирования
-        int[] statusCodes = {200, 404, 500, 302};
-        return statusCodes[(int) (Math.random() * statusCodes.length)];
     }
 }
